@@ -12,6 +12,13 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/mozilla/sccache/"
 
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+pkg-url = "https://github.com/vercel/sccache/releases/latest/download/{ name }-{ target }{ archive-suffix }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "sccache"
 

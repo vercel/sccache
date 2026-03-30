@@ -1,0 +1,58 @@
+name: vercel-ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: test ubuntu
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v5
+
+      - name: Install rust
+        uses: ./.github/actions/rust-toolchain
+        with:
+          toolchain: stable
+
+      - name: Install gcc & clang for tests
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -x
+          if dpkg -s gcc-14 >/dev/null 2>&1; then
+            sudo apt remove -y gcc-14 g++-14
+            sudo apt autoremove -y
+          fi
+          sudo apt install -y --no-install-recommends gcc clang
+
+      - name: Execute tests
+        run: cargo test --locked --lib --bins --tests
+
+  windows-build-check:
+    name: build-check windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v5
+
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Strawberry Perl (for openssl-src)
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          distribution: strawberry
+
+      - name: Build sccache (release, openssl vendored)
+        run: cargo build --locked --release --bin sccache --target x86_64-pc-windows-msvc --features openssl/vendored
