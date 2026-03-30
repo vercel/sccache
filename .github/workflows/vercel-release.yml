@@ -1,0 +1,107 @@
+name: vercel-release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Crate version to release (defaults to 1.0.YYYYMMDD)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: tag v{version}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: v
+        run: |
+          V="${{ inputs.version }}"
+          if [ -z "$V" ]; then
+            V="1.0.$(date -u +%Y%m%d)"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Cargo.toml and push tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.v.outputs.version }}"
+          cargo install cargo-edit --locked
+          cargo set-version "$V"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "release v$V"
+
+          # Idempotency: wipe any prior tag/release (e.g. from a failed rerun on the same day)
+          gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
+          git tag -d "v$V" 2>/dev/null || true
+          git push origin ":refs/tags/v$V" 2>/dev/null || true
+
+          git tag "v$V"
+          git push origin "v$V"
+
+          # Create the empty release so the build matrix can upload assets to it
+          gh release create "v$V" --title "v$V" --notes "Automated release v$V"
+
+  generate-matrix:
+    name: generate build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - name: Generate matrix
+        id: m
+        uses: mmastrac/mmm-matrix@v1
+        with:
+          input: |
+            label:
+              linux:
+                os: ubuntu-latest
+                target:
+                  - x86_64-unknown-linux-musl
+                  - aarch64-unknown-linux-musl
+              macos:
+                os: macos-latest
+                target:
+                  - x86_64-apple-darwin
+                  - aarch64-apple-darwin
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: [tag, generate-matrix]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Clone tagged commit
+        uses: actions/checkout@v5
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build and upload release asset
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: sccache
+          target: ${{ matrix.target }}
+          archive: $bin-$target
+          features: openssl/vendored
+          ref: refs/tags/v${{ needs.tag.outputs.version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
