@@ -343,12 +343,8 @@ impl LruDiskCache {
 
     /// Commit an entry coming from `LruDiskCache::prepare_add`.
     pub fn commit(&mut self, entry: LruDiskCacheAddEntry) -> Result<()> {
-        let LruDiskCacheAddEntry {
-            mut file,
-            key,
-            size,
-        } = entry;
-        file.flush()?;
+        let LruDiskCacheAddEntry { file, key, size } = entry;
+        file.as_file().sync_all()?;
         let real_size = file.as_file().metadata()?.len();
         // If the file is larger than the size that had been advertized, ensure
         // we have enough space for it.
@@ -361,7 +357,10 @@ impl LruDiskCache {
         self.pending_size -= size;
         let path = self.rel_to_abs_path(&key);
         fs::create_dir_all(path.parent().unwrap())?;
-        file.persist(path).map_err(|e| e.error)?;
+        // Close the writable fd before rename to prevent fork() from
+        // inheriting it (see persist_temp_file in cache_io.rs).
+        let tmp_path = file.into_temp_path();
+        tmp_path.persist(&path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
         Ok(())
     }
