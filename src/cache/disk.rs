@@ -152,6 +152,8 @@ impl Storage for DiskCache {
         self.pool
             .spawn_blocking(move || {
                 let start = Instant::now();
+                // Hold FORK_LOCK while writable fd exists (see lib.rs).
+                let _fork_guard = crate::FORK_LOCK.read().unwrap();
                 let mut f = lru
                     .lock()
                     .unwrap()
@@ -159,6 +161,7 @@ impl Storage for DiskCache {
                     .prepare_add(key, data.len() as u64)?;
                 f.as_file_mut().write_all(&data)?;
                 lru.lock().unwrap().get().unwrap().commit(f)?;
+                drop(_fork_guard);
                 Ok(start.elapsed())
             })
             .await?
@@ -208,6 +211,8 @@ impl Storage for DiskCache {
         }
 
         let key = normalize_key(key);
+        // Hold FORK_LOCK while writable fd exists (see lib.rs).
+        let _fork_guard = crate::FORK_LOCK.read().unwrap();
         let mut f = self
             .preprocessor_cache
             .lock()
@@ -215,13 +220,15 @@ impl Storage for DiskCache {
             .get_or_init()?
             .prepare_add(key, 0)?;
         preprocessor_cache_entry.serialize_to(BufWriter::new(f.as_file_mut()))?;
-        Ok(self
+        let result = self
             .preprocessor_cache
             .lock()
             .unwrap()
             .get()
             .unwrap()
-            .commit(f)?)
+            .commit(f);
+        drop(_fork_guard);
+        Ok(result?)
     }
 }
 

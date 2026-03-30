@@ -255,9 +255,14 @@ impl RunCommand for AsyncCommand {
 
         let token = self.jobserver.acquire().await?;
         let mut inner = tokio::process::Command::from(inner);
+        // Take FORK_LOCK write lock to ensure no writable fds exist at
+        // fork time. The jobserver uses pre_exec which forces fork+exec
+        // (not posix_spawn), and fork inherits all fds. See lib.rs.
+        let _fork_guard = crate::FORK_LOCK.write().unwrap();
         let child = inner
             .spawn()
             .with_context(|| format!("failed to spawn {:?}", inner))?;
+        drop(_fork_guard);
 
         Ok(Child {
             inner: child,
