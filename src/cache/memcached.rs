@@ -21,6 +21,21 @@ use opendal::services::Memcached;
 
 use crate::errors::*;
 
+/// Resolve hostname in a memcached endpoint URL to an IP address.
+/// The new opendal memcached service uses SocketAddr::parse internally which
+/// doesn't support DNS hostnames, only IP:port. This works around that by
+/// resolving tcp://hostname:port to tcp://ip:port.
+fn resolve_memcached_endpoint(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("tcp://") {
+        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&rest) {
+            if let Some(addr) = addrs.into_iter().next() {
+                return format!("tcp://{}", addr);
+            }
+        }
+    }
+    url.to_string()
+}
+
 #[derive(Clone)]
 pub struct MemcachedCache;
 
@@ -32,7 +47,10 @@ impl MemcachedCache {
         key_prefix: &str,
         expiration: u32,
     ) -> Result<Operator> {
-        let mut builder = Memcached::default().endpoint(url);
+        // The new opendal memcached service uses SocketAddr::parse which doesn't
+        // support hostnames. Resolve hostname to IP if the endpoint uses tcp://.
+        let url = resolve_memcached_endpoint(url);
+        let mut builder = Memcached::default().endpoint(&url);
 
         if let Some(username) = username {
             builder = builder.username(username);

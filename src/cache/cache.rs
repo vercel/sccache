@@ -40,9 +40,12 @@ use crate::cache::s3::S3Cache;
     feature = "s3",
     feature = "webdav",
     feature = "oss",
-    feature = "cos"
+    feature = "cos",
+    feature = "vercel_artifacts"
 ))]
 use crate::cache::utils::normalize_key;
+#[cfg(feature = "vercel_artifacts")]
+use crate::cache::vercel_artifacts::VercelArtifactsCache;
 #[cfg(feature = "webdav")]
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
@@ -169,6 +172,10 @@ pub trait Storage: Send + Sync {
 pub struct RemoteStorage {
     operator: opendal::Operator,
     basedirs: Vec<Vec<u8>>,
+    /// Optional transform applied to every key (including health-check paths)
+    /// before it is sent to the operator.  Used by backends like Vercel Artifacts
+    /// that only accept alphanumeric artifact IDs.
+    key_transform: Option<fn(&str) -> String>,
 }
 
 #[cfg(any(
@@ -184,7 +191,31 @@ pub struct RemoteStorage {
 ))]
 impl RemoteStorage {
     pub fn new(operator: opendal::Operator, basedirs: Vec<Vec<u8>>) -> Self {
-        Self { operator, basedirs }
+        Self {
+            operator,
+            basedirs,
+            key_transform: None,
+        }
+    }
+
+    pub fn new_with_key_transform(
+        operator: opendal::Operator,
+        basedirs: Vec<Vec<u8>>,
+        key_transform: fn(&str) -> String,
+    ) -> Self {
+        Self {
+            operator,
+            basedirs,
+            key_transform: Some(key_transform),
+        }
+    }
+
+    fn key_path(&self, key: &str) -> String {
+        let normalized = normalize_key(key);
+        match self.key_transform {
+            Some(transform) => transform(&normalized),
+            None => normalized,
+        }
     }
 }
 
@@ -203,7 +234,7 @@ impl RemoteStorage {
 #[async_trait]
 impl Storage for RemoteStorage {
     async fn get(&self, key: &str) -> Result<Cache> {
-        match self.operator.read(&normalize_key(key)).await {
+        match self.operator.read(&self.key_path(key)).await {
             Ok(res) => {
                 let hit = CacheRead::from(io::Cursor::new(res.to_bytes()))?;
                 Ok(Cache::Hit(hit))
@@ -226,10 +257,10 @@ impl Storage for RemoteStorage {
     async fn check(&self) -> Result<CacheMode> {
         use opendal::ErrorKind;
 
-        let path = ".sccache_check";
+        let path = self.key_path(".sccache_check");
 
         // Read is required, return error directly if we can't read .
-        match self.operator.read(path).await {
+        match self.operator.read(&path).await {
             Ok(_) => (),
             // Read not exist file with not found is ok.
             Err(err) if err.kind() == ErrorKind::NotFound => (),
@@ -248,7 +279,7 @@ impl Storage for RemoteStorage {
             Err(err) => bail!("cache storage failed to read: {:?}", err),
         }
 
-        let can_write = match self.operator.write(path, "Hello, World!").await {
+        let can_write = match self.operator.write(&path, "Hello, World!").await {
             Ok(_) => true,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => true,
             // Tolerate all other write errors because we can do read at least.
@@ -306,7 +337,7 @@ impl Storage for RemoteStorage {
     /// which would corrupt the cache entry when written to another level.
     async fn get_raw(&self, key: &str) -> Result<Option<Vec<u8>>> {
         trace!("opendal::Operator::get_raw({})", key);
-        match self.operator.read(&normalize_key(key)).await {
+        match self.operator.read(&self.key_path(key)).await {
             Ok(res) => {
                 let data = res.to_vec();
                 trace!(
@@ -337,7 +368,7 @@ impl Storage for RemoteStorage {
         trace!("opendal::Operator::put_raw({}, {} bytes)", key, data.len());
         let start = std::time::Instant::now();
 
-        self.operator.write(&normalize_key(key), data).await?;
+        self.operator.write(&self.key_path(key), data).await?;
 
         Ok(start.elapsed())
     }
@@ -540,6 +571,24 @@ pub fn build_single_cache(
                 .map_err(|err| anyhow!("create cos cache failed: {err:?}"))?;
 
             let storage = RemoteStorage::new(operator, basedirs.to_vec());
+            Ok(Arc::new(storage))
+        }
+        #[cfg(feature = "vercel_artifacts")]
+        CacheType::VercelArtifacts(c) => {
+            debug!("Init vercel artifacts cache");
+
+            let operator = VercelArtifactsCache::build(
+                &c.access_token,
+                c.endpoint.as_deref(),
+                c.team_id.as_deref(),
+                c.team_slug.as_deref(),
+            )
+            .map_err(|err| anyhow!("create vercel artifacts cache failed: {err:?}"))?;
+            let storage = RemoteStorage::new_with_key_transform(
+                operator,
+                basedirs.to_vec(),
+                crate::cache::vercel_artifacts::sanitize_key,
+            );
             Ok(Arc::new(storage))
         }
         #[allow(unreachable_patterns)]

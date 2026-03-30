@@ -409,7 +409,8 @@ impl MultiLevelStorage {
                     feature = "s3",
                     feature = "webdav",
                     feature = "oss",
-                    feature = "cos"
+                    feature = "cos",
+                    feature = "vercel_artifacts"
                 ))]
                 {
                     let cache_type = match level_name.to_lowercase().as_str() {
@@ -435,6 +436,12 @@ impl MultiLevelStorage {
                         "oss" => config.cache_configs.oss.clone().map(CacheType::OSS),
                         #[cfg(feature = "cos")]
                         "cos" => config.cache_configs.cos.clone().map(CacheType::COS),
+                        #[cfg(feature = "vercel_artifacts")]
+                        "vercel_artifacts" => config
+                            .cache_configs
+                            .vercel_artifacts
+                            .clone()
+                            .map(CacheType::VercelArtifacts),
                         _ => {
                             return Err(anyhow!("Unknown cache level: '{}'", level_name));
                         }
