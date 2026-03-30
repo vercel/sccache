@@ -50,6 +50,24 @@ pub mod server;
 pub mod util;
 
 use std::env;
+use std::sync::RwLock;
+
+/// Lock to prevent fork() from inheriting writable file descriptors.
+///
+/// The sccache daemon handles concurrent compile requests. The jobserver
+/// crate's `configure()` uses `pre_exec`, which forces Rust's Command::spawn
+/// to use fork+exec instead of posix_spawn. At fork time, the child inherits
+/// ALL of the daemon's open file descriptors. If any fd has write access to
+/// a file that cargo later hard-links and tries to execve(), the kernel
+/// returns ETXTBSY because the forked child still holds the writable fd
+/// between fork() and execve() (O_CLOEXEC only fires at execve, not fork).
+///
+/// To prevent this:
+/// - Code that holds writable fds to output files takes a **read lock**
+///   (multiple writers can proceed concurrently).
+/// - Code that calls fork/spawn takes a **write lock**, ensuring no writable
+///   fds exist at fork time.
+pub static FORK_LOCK: RwLock<()> = RwLock::new(());
 
 /// VERSION is the pkg version of sccache.
 ///
