@@ -99,11 +99,53 @@ impl Digest {
     /// the actual hash computation on a background thread in `pool`.
     pub async fn reader(path: PathBuf, pool: &tokio::runtime::Handle) -> Result<String> {
         pool.spawn_blocking(move || {
-            let reader = File::open(&path)
-                .with_context(|| format!("Failed to open file for hashing: {:?}", path))?;
-            Digest::reader_sync(reader)
+            if path.is_dir() {
+                // For directories (e.g., from proc_macro::tracked::path()),
+                // recursively hash all file contents in sorted order.
+                let mut entries = Vec::new();
+                Self::collect_dir_entries(&path, &mut entries)?;
+                entries.sort();
+                let mut digest = Digest::new();
+                for entry in &entries {
+                    // Hash the relative path as a delimiter
+                    let rel = entry.strip_prefix(&path).unwrap_or(entry);
+                    digest.update(rel.to_string_lossy().as_bytes());
+                    digest.update(b"\0");
+                    let mut file = File::open(entry)
+                        .with_context(|| format!("Failed to open file for hashing: {:?}", entry))?;
+                    let mut buf = vec![0u8; HASH_BUFFER_SIZE];
+                    loop {
+                        let n = file.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        digest.update(&buf[..n]);
+                    }
+                }
+                Ok(digest.finish())
+            } else {
+                let reader = File::open(&path)
+                    .with_context(|| format!("Failed to open file for hashing: {:?}", path))?;
+                Digest::reader_sync(reader)
+            }
         })
         .await?
+    }
+
+    /// Recursively collect all file paths within a directory.
+    fn collect_dir_entries(dir: &Path, entries: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
+            .with_context(|| format!("Failed to read directory for hashing: {:?}", dir))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect_dir_entries(&path, entries)?;
+            } else {
+                entries.push(path);
+            }
+        }
+        Ok(())
     }
 
     pub fn update(&mut self, bytes: &[u8]) {
