@@ -224,6 +224,8 @@ export SCCACHE_MULTILEVEL_WRITE_POLICY="all"
 * `SCCACHE_CACHE_SIZE` maximum size of the local on disk cache i.e. `2G` - default is 10G
 * `SCCACHE_DIRECT` enable/disable preprocessor caching (see [the local doc](Local.md))
 * `SCCACHE_LOCAL_RW_MODE` the mode that the cache will operate in (`READ_ONLY` or `READ_WRITE`)
+* `SCCACHE_FILE_CLONE` enable reflink-based uncompressed disk cache (see [FileClone docs](FileClone.md))
+* `SCCACHE_FILE_CLONE_COMPRESS` command to run on each cache entry directory after writing (e.g., `applesauce compress -c lzfse`). The entry directory path is appended to the command. Only used when `SCCACHE_FILE_CLONE=true`.
 
 #### s3 compatible
 

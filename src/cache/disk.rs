@@ -139,6 +139,26 @@ fn write_uncompressed_entry(cache_root: &Path, key_dir: &Path, entry: CacheWrite
         }
     }
 
+    // If SCCACHE_FILE_CLONE_COMPRESS is set, spawn the command with the entry
+    // directory appended. This allows users to apply transparent compression
+    // (e.g., APFS compression via `applesauce compress -c lzfse`).
+    if let Ok(cmd) = std::env::var("SCCACHE_FILE_CLONE_COMPRESS") {
+        if let Some(parts) = shlex::split(&cmd) {
+            if let Some((program, args)) = parts.split_first() {
+                let mut command = std::process::Command::new(program);
+                command
+                    .args(args)
+                    .arg(&entry_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                match command.spawn() {
+                    Ok(_) => trace!("Spawned file_clone compress: {} {:?}", cmd, entry_dir),
+                    Err(e) => trace!("Failed to spawn file_clone compress: {}", e),
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
