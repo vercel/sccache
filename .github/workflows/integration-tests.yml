@@ -44,26 +44,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Test
-        run: cd tests/integration && WITH_COVERAGE=1 make test-${{ matrix.type }}
-
-      - name: Build report
-        run: |
-          cd tests/integration
-          WITH_COVERAGE=1 make coverage-report
-          echo "Coverage files:"
-          ls ../../target/integration-coverage/profraw -l
-          echo "Coverage report:"
-          ls ../../target/integration-coverage/reports/lcov.info -l
-
-      - name: Upload coverage results (to Codecov.io)
-        uses: codecov/codecov-action@v5
-        with:
-          files: target/integration-coverage/reports/lcov.info
-          name: codecov-umbrella-integration-${{ matrix.type }}
-          fail_ci_if_error: true
-          # verbose: true
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: cd tests/integration && make test-${{ matrix.type }}
 
   gha:
     runs-on: ubuntu-24.04
