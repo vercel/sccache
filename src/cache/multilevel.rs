@@ -395,6 +395,7 @@ impl MultiLevelStorage {
                     preprocessor_cache_mode_config,
                     rw_mode,
                     config.basedirs.clone(),
+                    disk_config.file_clone,
                 ));
                 storages.push(disk_storage);
                 trace!("Added disk cache level");

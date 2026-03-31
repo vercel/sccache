@@ -162,6 +162,7 @@ mod test {
             super::PreprocessorCacheModeConfig::default(),
             super::CacheMode::ReadWrite,
             basedirs.clone(),
+            false,
         );
 
         let readonly_storage = ReadOnlyStorage(std::sync::Arc::new(disk_cache));
@@ -220,6 +221,7 @@ mod test {
             super::PreprocessorCacheModeConfig::default(),
             super::CacheMode::ReadWrite,
             vec![],
+            false,
         );
 
         let readonly_storage = ReadOnlyStorage(std::sync::Arc::new(disk_cache));
