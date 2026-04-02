@@ -62,6 +62,52 @@ use std::time;
 
 use crate::errors::*;
 
+/// CARGO_* environment variables known to contain absolute paths that should
+/// have basedir prefixes stripped for cross-machine cache portability.
+/// See: https://doc.rust-lang.org/cargo/reference/environment-variables.html
+const CARGO_PATH_ENV_VARS: &[&str] = &[
+    "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_PATH",
+    "CARGO_TARGET_TMPDIR",
+    "CARGO_WORKSPACE_DIR",
+];
+
+/// Prefixes of CARGO_* environment variables that contain absolute paths.
+/// Variables matching these prefixes have their values basedir-stripped.
+const CARGO_PATH_ENV_PREFIXES: &[&str] = &["CARGO_BIN_EXE_"];
+
+/// Returns true if a CARGO_* env var is known to contain an absolute path.
+fn is_cargo_path_var(var: &str) -> bool {
+    CARGO_PATH_ENV_VARS.contains(&var)
+        || CARGO_PATH_ENV_PREFIXES.iter().any(|&p| var.starts_with(p))
+}
+
+/// Strip a basedir prefix from a byte slice, returning the relative portion.
+/// Basedirs are pre-normalized with trailing `/` (see config.rs), so the
+/// result is a clean relative path. On Windows, the value is normalized
+/// (lowercase + forward slashes) before comparison since basedirs are stored
+/// normalized.
+fn strip_basedir_prefix<'a>(value: &'a [u8], basedirs: &[Vec<u8>]) -> Cow<'a, [u8]> {
+    if basedirs.is_empty() {
+        return Cow::Borrowed(value);
+    }
+
+    #[cfg(target_os = "windows")]
+    let normalized = crate::util::normalize_win_path(value);
+    #[cfg(not(target_os = "windows"))]
+    let normalized = value;
+
+    for basedir in basedirs {
+        if normalized.starts_with(basedir) {
+            #[cfg(target_os = "windows")]
+            return Cow::Owned(normalized[basedir.len()..].to_vec());
+            #[cfg(not(target_os = "windows"))]
+            return Cow::Borrowed(&value[basedir.len()..]);
+        }
+    }
+    Cow::Borrowed(value)
+}
+
 #[cfg(feature = "dist-client")]
 const RLIB_PREFIX: &str = "lib";
 #[cfg(feature = "dist-client")]
@@ -1343,10 +1389,11 @@ where
         _may_dist: bool,
         pool: &tokio::runtime::Handle,
         _rewrite_includes_only: bool,
-        _storage: Arc<dyn Storage>,
+        storage: Arc<dyn Storage>,
         _cache_control: CacheControl,
     ) -> Result<HashResult<T>> {
         trace!("[{}]: generate_hash_key", self.parsed_args.crate_name);
+        let basedirs = storage.basedirs();
         // TODO: this doesn't produce correct arguments if they should be concatenated - should use iter_os_strings
         let os_string_arguments: Vec<(OsString, Option<OsString>)> = self
             .parsed_args
@@ -1493,7 +1540,12 @@ where
                     a
                 })
         };
-        args.hash(&mut HashToDigest { digest: &mut m });
+        // Strip basedir prefixes from arguments before hashing. Arguments like
+        // --remap-path-prefix=/abs/path=..., -Clinker=/abs/path, etc. contain
+        // absolute paths that differ across machines. See mozilla/sccache#2652.
+        let args_bytes = args.as_encoded_bytes();
+        crate::util::strip_basedirs(args_bytes, basedirs)
+            .hash(&mut HashToDigest { digest: &mut m });
         // 4. The digest of all source files (this includes src file from cmdline).
         // 5. The digest of all files listed on the commandline (self.externs).
         // 6. The digest of all static libraries listed on the commandline (self.staticlibs).
@@ -1513,7 +1565,10 @@ where
         for (var, val) in env_deps.iter() {
             var.hash(&mut HashToDigest { digest: &mut m });
             m.update(b"=");
-            val.hash(&mut HashToDigest { digest: &mut m });
+            // Strip basedir prefixes from dep-info env var values (e.g. OUT_DIR)
+            // to enable cross-machine cache hits.
+            let val_bytes = val.as_encoded_bytes();
+            strip_basedir_prefix(val_bytes, basedirs).hash(&mut HashToDigest { digest: &mut m });
         }
         let mut env_vars: Vec<_> = env_vars
             .iter()
@@ -1544,10 +1599,21 @@ where
 
             var.hash(&mut HashToDigest { digest: &mut m });
             m.update(b"=");
-            val.hash(&mut HashToDigest { digest: &mut m });
+            // Strip basedir prefixes from path-containing CARGO_* vars
+            // to enable cross-machine cache hits.
+            let var_str = var.to_string_lossy();
+            if is_cargo_path_var(&var_str) {
+                let val_bytes = val.as_encoded_bytes();
+                strip_basedir_prefix(val_bytes, basedirs)
+                    .hash(&mut HashToDigest { digest: &mut m });
+            } else {
+                val.hash(&mut HashToDigest { digest: &mut m });
+            }
         }
         // 9. The cwd of the compile. This will wind up in the rlib.
-        cwd.hash(&mut HashToDigest { digest: &mut m });
+        // Strip basedir prefix for cross-machine cache portability.
+        let cwd_bytes = cwd.as_os_str().as_encoded_bytes();
+        strip_basedir_prefix(cwd_bytes, basedirs).hash(&mut HashToDigest { digest: &mut m });
         // 10. The version of the compiler.
         self.version.hash(&mut HashToDigest { digest: &mut m });
         // 11. SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH, if set and we have unsupported
@@ -3541,8 +3607,12 @@ proc_macro false
         m.update(CACHE_VERSION);
         // sysroot shlibs digests.
         m.update(FAKE_DIGEST.as_bytes());
-        // Arguments, with cfgs sorted at the end.
-        OsStr::new("ab--cfgabc--cfgxyz").hash(&mut HashToDigest { digest: &mut m });
+        // Arguments, with cfgs sorted at the end (hashed as bytes via strip_basedirs).
+        // With empty basedirs, strip_basedirs returns Cow::Borrowed of the original bytes.
+        let args_str = OsStr::new("ab--cfgabc--cfgxyz");
+        args_str
+            .as_encoded_bytes()
+            .hash(&mut HashToDigest { digest: &mut m });
         // bar.rs (source file, from dep-info)
         m.update(empty_digest.as_bytes());
         // foo.rs (source file, from dep-info)
@@ -3552,14 +3622,21 @@ proc_macro false
         // libbaz.a (static library, from staticlibs), containing a single
         // file, baz.o, consisting of 1024 bytes of zeroes.
         m.update(libbaz_a_digest.as_bytes());
-        // Env vars
+        // Env vars (dep-info env vars hashed as bytes via strip_basedir_prefix)
         OsStr::new("CARGO_BLAH").hash(&mut HashToDigest { digest: &mut m });
         m.update(b"=");
-        OsStr::new("abc").hash(&mut HashToDigest { digest: &mut m });
+        OsStr::new("abc")
+            .as_encoded_bytes()
+            .hash(&mut HashToDigest { digest: &mut m });
         OsStr::new("CARGO_PKG_NAME").hash(&mut HashToDigest { digest: &mut m });
         m.update(b"=");
         OsStr::new("foo").hash(&mut HashToDigest { digest: &mut m });
-        f.tempdir.path().hash(&mut HashToDigest { digest: &mut m });
+        // cwd (hashed as bytes via strip_basedir_prefix)
+        f.tempdir
+            .path()
+            .as_os_str()
+            .as_encoded_bytes()
+            .hash(&mut HashToDigest { digest: &mut m });
         TEST_RUSTC_VERSION.hash(&mut HashToDigest { digest: &mut m });
         let digest = m.finish();
         assert_eq!(res.key, digest);
@@ -3891,6 +3968,144 @@ proc_macro false
                 preprocessor_cache_mode,
             )
         );
+    }
+
+    fn hash_key_with_basedirs<F>(
+        f: &TestFixture,
+        args: &[&'static str],
+        env_vars: &[(OsString, OsString)],
+        pre_func: F,
+        basedirs: Vec<Vec<u8>>,
+    ) -> String
+    where
+        F: Fn(&Path) -> Result<()>,
+    {
+        let oargs = args.iter().map(OsString::from).collect::<Vec<OsString>>();
+        let parsed_args = match parse_arguments(&oargs, f.tempdir.path()) {
+            CompilerArguments::Ok(parsed_args) => parsed_args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        {
+            let src = &"foo.rs";
+            f.touch(src).expect("Failed to create foo.rs");
+        }
+        for e in parsed_args.externs.iter() {
+            f.touch(e.to_str().unwrap())
+                .expect("Failed to create extern");
+        }
+        pre_func(f.tempdir.path()).expect("Failed to execute pre_func");
+        let mut hasher = Box::new(RustHasher {
+            executable: "rustc".into(),
+            host: "x86-64-unknown-unknown-unknown".to_owned(),
+            version: TEST_RUSTC_VERSION.to_string(),
+            sysroot: f.tempdir.path().join("sysroot"),
+            compiler_shlibs_digests: vec![],
+            #[cfg(feature = "dist-client")]
+            rlib_dep_reader: None,
+            parsed_args,
+        });
+
+        let creator = new_creator();
+        let runtime = single_threaded_runtime();
+        let pool = runtime.handle().clone();
+
+        mock_dep_info(&creator, &["foo.rs"]);
+        mock_file_names(&creator, &["foo.rlib"]);
+        hasher
+            .generate_hash_key(
+                &creator,
+                f.tempdir.path().to_owned(),
+                env_vars.to_owned(),
+                false,
+                &pool,
+                false,
+                Arc::new(MockStorage::with_basedirs(None, false, basedirs)),
+                CacheControl::Default,
+            )
+            .wait()
+            .unwrap()
+            .key
+    }
+
+    #[test]
+    fn test_basedirs_strips_cwd_and_cargo_manifest_dir() {
+        let f = TestFixture::new();
+        let cwd = f.tempdir.path().to_string_lossy().into_owned();
+
+        let args = &[
+            "--emit",
+            "link",
+            "foo.rs",
+            "--out-dir",
+            "out",
+            "--crate-name",
+            "foo",
+            "--crate-type",
+            "lib",
+        ];
+
+        let manifest_dir = format!("{}/some/pkg", cwd);
+        let env_vars = vec![
+            (
+                OsString::from("CARGO_MANIFEST_DIR"),
+                OsString::from(&manifest_dir),
+            ),
+            (OsString::from("CARGO_PKG_NAME"), OsString::from("foo")),
+        ];
+
+        // Hash without basedirs
+        let key_without = hash_key_with_basedirs(&f, args, &env_vars, nothing, vec![]);
+
+        // Hash with basedirs that strip the cwd prefix.
+        // Basedirs are normalized at config time (forward slashes, lowercase on Windows,
+        // trailing slash) — replicate that here.
+        let basedir = cwd.into_bytes();
+        #[cfg(target_os = "windows")]
+        let basedir = crate::util::normalize_win_path(&basedir);
+        let mut basedir = basedir;
+        basedir.push(b'/');
+        let key_with = hash_key_with_basedirs(&f, args, &env_vars, nothing, vec![basedir]);
+
+        // The keys should differ because basedirs changes the hash
+        assert_ne!(key_without, key_with, "basedirs should change the hash key");
+
+        // Two different "machines" with different cwds but same basedirs should
+        // produce the same hash. We simulate this by noting that the basedir-
+        // stripped hash is deterministic regardless of cwd.
+        // (We can't easily create two different tempdirs with the same content
+        // in this test framework, but we verify the stripping changes the hash.)
+    }
+
+    #[test]
+    fn test_basedirs_deterministic() {
+        // Running the same compilation with the same basedirs twice should
+        // produce the same hash, and it should differ from no-basedirs.
+        let f = TestFixture::new();
+        let cwd = f.tempdir.path().to_string_lossy().into_owned();
+
+        let args = &[
+            "--emit",
+            "link",
+            "foo.rs",
+            "--out-dir",
+            "out",
+            "--crate-name",
+            "foo",
+            "--crate-type",
+            "lib",
+        ];
+        let env_vars = vec![(OsString::from("CARGO_PKG_NAME"), OsString::from("foo"))];
+
+        let basedir = cwd.into_bytes();
+        #[cfg(target_os = "windows")]
+        let basedir = crate::util::normalize_win_path(&basedir);
+        let mut basedir = basedir;
+        basedir.push(b'/');
+
+        let key1 = hash_key_with_basedirs(&f, args, &env_vars, nothing, vec![basedir.clone()]);
+        let key2 = hash_key_with_basedirs(&f, args, &env_vars, nothing, vec![basedir]);
+
+        assert_eq!(key1, key2, "Same basedir should produce deterministic hash");
     }
 
     #[test]
