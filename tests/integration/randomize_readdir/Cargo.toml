@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "randomize_readdir"
-version = "0.1.0"
+version = "1.0.20260416"
 
 [dependencies]
 ctor = "0.2"
