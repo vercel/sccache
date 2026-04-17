@@ -349,6 +349,15 @@ pub struct GHACacheConfig {
     pub version: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VercelArtifactsCacheConfig {
+    pub access_token: String,
+    pub endpoint: Option<String>,
+    pub team_id: Option<String>,
+    pub team_slug: Option<String>,
+}
+
 /// Memcached's default value of expiration is 10800s (3 hours), which is too
 /// short for use case of sccache.
 ///
@@ -484,6 +493,7 @@ pub enum CacheType {
     Webdav(WebdavCacheConfig),
     OSS(OSSCacheConfig),
     COS(COSCacheConfig),
+    VercelArtifacts(VercelArtifactsCacheConfig),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -499,6 +509,7 @@ pub struct CacheConfigs {
     pub webdav: Option<WebdavCacheConfig>,
     pub oss: Option<OSSCacheConfig>,
     pub cos: Option<COSCacheConfig>,
+    pub vercel_artifacts: Option<VercelArtifactsCacheConfig>,
     /// Multi-level cache configuration
     pub multilevel: Option<MultiLevelConfig>,
 }
@@ -518,6 +529,7 @@ impl CacheConfigs {
             webdav,
             oss,
             cos,
+            vercel_artifacts,
             multilevel: _,
         } = self;
 
@@ -530,7 +542,8 @@ impl CacheConfigs {
             .or_else(|| azure.map(CacheType::Azure))
             .or_else(|| webdav.map(CacheType::Webdav))
             .or_else(|| oss.map(CacheType::OSS))
-            .or_else(|| cos.map(CacheType::COS));
+            .or_else(|| cos.map(CacheType::COS))
+            .or_else(|| vercel_artifacts.map(CacheType::VercelArtifacts));
 
         let fallback = disk.unwrap_or_default();
 
@@ -576,6 +589,13 @@ impl CacheConfigs {
                     "oss" => self.oss.clone().map(CacheType::OSS).ok_or_else(|| {
                         anyhow!("OSS cache not configured but specified in levels")
                     })?,
+                    "vercel_artifacts" => self
+                        .vercel_artifacts
+                        .clone()
+                        .map(CacheType::VercelArtifacts)
+                        .ok_or_else(|| {
+                            anyhow!("Vercel Artifacts cache not configured but specified in levels")
+                        })?,
                     "disk" => {
                         // Disk cache is handled separately in MultiLevelStorage::from_config
                         // Mark it by continuing - it will be added to the storage list there
@@ -606,6 +626,7 @@ impl CacheConfigs {
             webdav,
             oss,
             cos,
+            vercel_artifacts,
             multilevel,
         } = other;
 
@@ -638,6 +659,9 @@ impl CacheConfigs {
         }
         if cos.is_some() {
             self.cos = cos;
+        }
+        if vercel_artifacts.is_some() {
+            self.vercel_artifacts = vercel_artifacts;
         }
 
         if multilevel.is_some() {
@@ -1092,6 +1116,21 @@ fn config_from_env() -> Result<EnvConfig> {
         None
     };
 
+    // ======= Vercel Artifacts =======
+    let vercel_artifacts = if let Ok(access_token) = env::var("SCCACHE_VERCEL_ARTIFACTS_TOKEN") {
+        let endpoint = env::var("SCCACHE_VERCEL_ARTIFACTS_ENDPOINT").ok();
+        let team_id = env::var("SCCACHE_VERCEL_ARTIFACTS_TEAM_ID").ok();
+        let team_slug = env::var("SCCACHE_VERCEL_ARTIFACTS_TEAM_SLUG").ok();
+        Some(VercelArtifactsCacheConfig {
+            access_token,
+            endpoint,
+            team_id,
+            team_slug,
+        })
+    } else {
+        None
+    };
+
     // ======= Local =======
     let disk_dir = env::var_os("SCCACHE_DIR").map(PathBuf::from);
     let disk_sz = env::var("SCCACHE_CACHE_SIZE")
@@ -1162,6 +1201,7 @@ fn config_from_env() -> Result<EnvConfig> {
         webdav,
         oss,
         cos,
+        vercel_artifacts,
         multilevel,
     };
 
@@ -2362,6 +2402,7 @@ key_prefix = "cosprefix"
                     endpoint: Some("cos.na-siliconvalley.myqcloud.com".to_owned()),
                     key_prefix: "cosprefix".into(),
                 }),
+                vercel_artifacts: None,
                 multilevel: None,
             },
             dist: DistConfig {

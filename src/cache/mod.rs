@@ -37,6 +37,8 @@ pub mod redis;
 #[cfg(feature = "s3")]
 pub mod s3;
 pub(crate) mod utils;
+#[cfg(feature = "vercel_artifacts")]
+pub mod vercel_artifacts;
 #[cfg(feature = "webdav")]
 pub mod webdav;
 
@@ -47,7 +49,8 @@ pub mod webdav;
     feature = "s3",
     feature = "webdav",
     feature = "oss",
-    feature = "cos"
+    feature = "cos",
+    feature = "vercel_artifacts"
 ))]
 pub(crate) mod http_client;
 

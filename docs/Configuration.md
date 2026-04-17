@@ -310,3 +310,10 @@ The full url appears then as `redis://user:passwd@1.2.3.4:6379/?db=1`.
 * `SCCACHE_COS_KEY_PREFIX`
 * `TENCENTCLOUD_SECRET_ID`
 * `TENCENTCLOUD_SECRET_KEY`
+
+#### Vercel Artifacts
+
+* `SCCACHE_VERCEL_ARTIFACTS_TOKEN` Vercel access token for the artifacts API (required)
+* `SCCACHE_VERCEL_ARTIFACTS_ENDPOINT` API endpoint (default: `https://api.vercel.com`)
+* `SCCACHE_VERCEL_ARTIFACTS_TEAM_ID` Vercel team ID, appended as `teamId` query parameter
+* `SCCACHE_VERCEL_ARTIFACTS_TEAM_SLUG` Vercel team slug, appended as `slug` query parameter

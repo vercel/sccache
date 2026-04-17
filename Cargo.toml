@@ -31,6 +31,7 @@ strip = true
 anyhow = { version = "1.0", features = ["backtrace"] }
 ar = "0.9"
 async-trait = "0.1"
+aws-lc-sys = { version = "0.39.1", features = ["prebuilt-nasm"] }
 backon = { version = "1", default-features = false, features = [
   "std-blocking-sleep",
 ] }
@@ -69,7 +70,9 @@ memmap2 = "0.9.4"
 mime = "0.3"
 number_prefix = "0.4"
 object = "0.37"
-opendal = { version = "0.55.0", optional = true, default-features = false }
+opendal = { version = "0.55.0", optional = true, default-features = false, features = [
+  "layers-logging",
+] }
 openssl = { version = "0.10.75", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"
@@ -167,6 +170,7 @@ all = [
   "webdav",
   "oss",
   "cos",
+  "vercel_artifacts",
 ]
 azure = ["opendal/services-azblob", "reqsign", "reqwest"]
 cos = ["opendal/services-cos", "reqsign", "reqwest"]
@@ -178,6 +182,7 @@ native-zlib = []
 oss = ["opendal/services-oss", "reqsign", "reqwest"]
 redis = ["url", "opendal/services-redis"]
 s3 = ["opendal/services-s3", "reqsign", "reqwest"]
+vercel_artifacts = ["opendal/services-vercel-artifacts", "reqwest"]
 webdav = ["opendal/services-webdav", "reqwest"]
 # Enable features that will build a vendored version of openssl and
 # statically linked with it, instead of linking against the system-wide openssl
@@ -233,3 +238,6 @@ ptr_as_ptr = "warn"
 ref_option = "warn"
 semicolon_if_nothing_returned = "warn"
 unnecessary_semicolon = "warn"
+
+[patch.crates-io]
+opendal = { git = "https://github.com/mmastrac/opendal.git", rev = "723ba7f7359e", package = "opendal" }
