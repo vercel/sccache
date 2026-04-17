@@ -820,6 +820,110 @@ where
     fn language(&self) -> Language;
 }
 
+/// Scan a command's arguments for `--out-dir` and extract the output directory path.
+/// Returns `Some((index_of_value, path))` if found, `None` otherwise.
+/// Handles both `--out-dir <path>` (separated) and `--out-dir=<path>` (joined).
+fn find_out_dir(args: &[OsString]) -> Option<(usize, PathBuf)> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].to_string_lossy();
+        if arg == "--out-dir" {
+            if i + 1 < args.len() {
+                return Some((i + 1, PathBuf::from(&args[i + 1])));
+            }
+        } else if let Some(path) = arg.strip_prefix("--out-dir=") {
+            return Some((i, PathBuf::from(path)));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Execute a compile command, redirecting `--out-dir` to a temporary directory
+/// and atomically renaming outputs to the real output directory afterward.
+///
+/// This prevents orphaned compiler processes (from killed cargo invocations)
+/// from corrupting output files — they write to a temp dir that becomes
+/// irrelevant when the next build creates its own temp dir.
+async fn execute_with_atomic_out_dir<T>(
+    compile_cmd: &dyn CompileCommand<T>,
+    service: &server::SccacheService<T>,
+    creator: &T,
+    out_pretty: &str,
+) -> Result<process::Output>
+where
+    T: CommandCreatorSync,
+{
+    let args = compile_cmd.get_arguments();
+
+    // Only redirect if --out-dir is present (rustc-specific)
+    let Some((out_dir_idx, real_out_dir)) = find_out_dir(&args) else {
+        return compile_cmd.execute(service, creator).await;
+    };
+
+    // Create temp dir inside the real out-dir (same filesystem for atomic rename)
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".sccache-tmp-")
+        .tempdir_in(&real_out_dir)
+        .with_context(|| {
+            format!(
+                "failed to create temp dir in {:?} for atomic output",
+                real_out_dir
+            )
+        })?;
+    let temp_path = temp_dir.path().to_path_buf();
+
+    trace!(
+        "[{}]: Redirecting --out-dir from {:?} to {:?}",
+        out_pretty, real_out_dir, temp_path
+    );
+
+    // Build new argument list with --out-dir replaced
+    let mut new_args: Vec<OsString> = args.clone();
+    let orig_arg = new_args[out_dir_idx].to_string_lossy();
+    if orig_arg.starts_with("--out-dir=") {
+        new_args[out_dir_idx] = OsString::from(format!("--out-dir={}", temp_path.display()));
+    } else {
+        new_args[out_dir_idx] = OsString::from(&temp_path);
+    }
+
+    // Execute with a new command using the rewritten arguments
+    let mut cmd = creator
+        .clone()
+        .new_command_sync(compile_cmd.get_executable());
+    cmd.args(&new_args)
+        .env_clear()
+        .envs(compile_cmd.get_env_vars())
+        .current_dir(compile_cmd.get_cwd());
+    let output = run_input_output(cmd, None).await?;
+
+    // After compilation, atomically rename each output file to the real dir
+    if output.status.success() {
+        match std::fs::read_dir(&temp_path) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let file_name = entry.file_name();
+                    let src = entry.path();
+                    let dst = real_out_dir.join(&file_name);
+                    std::fs::rename(&src, &dst)
+                        .with_context(|| format!("failed to rename {:?} to {:?}", src, dst))?;
+                    trace!("[{}]: Renamed {:?} -> {:?}", out_pretty, file_name, dst);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "[{}]: Failed to read temp dir {:?}: {}",
+                    out_pretty, temp_path, e
+                );
+            }
+        }
+    }
+    // temp_dir dropped here — removes the now-empty directory
+
+    Ok(output)
+}
+
 #[cfg(not(feature = "dist-client"))]
 async fn dist_or_local_compile<T>(
     service: &server::SccacheService<T>,
@@ -839,8 +943,7 @@ where
         .context("Failed to generate compile commands")?;
 
     debug!("[{}]: Compiling locally", out_pretty);
-    compile_cmd
-        .execute(&service, &creator)
+    execute_with_atomic_out_dir(compile_cmd.as_ref(), &service, &creator, &out_pretty)
         .await
         .map(move |o| (cacheable, DistType::NoDist, o))
 }
@@ -873,10 +976,14 @@ where
         Some(dc) => dc,
         None => {
             debug!("[{}]: Compiling locally", out_pretty);
-            return compile_cmd
-                .execute(service, &creator)
-                .await
-                .map(move |o| (cacheable, DistType::NoDist, o));
+            return execute_with_atomic_out_dir(
+                compile_cmd.as_ref(),
+                service,
+                &creator,
+                &out_pretty,
+            )
+            .await
+            .map(move |o| (cacheable, DistType::NoDist, o));
         }
     };
 

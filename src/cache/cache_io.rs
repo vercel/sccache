@@ -15,10 +15,24 @@ use crate::errors::*;
 use fs_err as fs;
 use std::fmt;
 use std::io::{Cursor, Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
+/// Atomically persist a NamedTempFile: fsync, close the writable fd, rename.
+///
+/// Caller MUST hold FORK_LOCK.read() for the entire NamedTempFile lifetime
+/// (from creation through this call). See FORK_LOCK in lib.rs.
+pub(crate) fn persist_temp_file(tmp: NamedTempFile, dest: &Path) -> Result<()> {
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("failed to fsync temp file before persisting to {:?}", dest))?;
+    let tmp_path = tmp.into_temp_path();
+    tmp_path
+        .persist(dest)
+        .map_err(|e| anyhow::anyhow!("Failed to persist {:?} to {:?}: {}", e.path, dest, e.error))
+}
 
 /// Cache object sourced by a file.
 #[derive(Clone)]
@@ -147,13 +161,14 @@ impl CacheRead {
                     Some(d) => d,
                     None => bail!("Output file without a parent directory!"),
                 };
-                // Write the cache entry to a tempfile and then atomically
-                // move it to its final location so that other rustc invocations
-                // happening in parallel don't see a partially-written file.
+                // Hold FORK_LOCK while we have a writable fd to prevent
+                // fork() from inheriting it (causes ETXTBSY, see lib.rs).
+                let _fork_guard = crate::FORK_LOCK.read().unwrap();
                 let mut tmp = NamedTempFile::new_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
-                        tmp.persist(&path)?;
+                        persist_temp_file(tmp, &path)?;
+                        drop(_fork_guard);
                         if let Some(mode) = mode {
                             set_file_mode(&path, mode)?;
                         }

@@ -228,6 +228,7 @@ pub struct RustCompilation {
 pub struct CrateTypes {
     rlib: bool,
     staticlib: bool,
+    others: Vec<String>,
 }
 
 /// Emit types that we will cache.
@@ -1075,6 +1076,7 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
     let mut crate_types = CrateTypes {
         rlib: false,
         staticlib: false,
+        others: vec![],
     };
     let mut extra_filename = None;
     let mut externs = vec![];
@@ -1125,10 +1127,16 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
             })) => {
                 // We can't cache non-rlib/staticlib crates, because rustc invokes the
                 // system linker to link them, and we don't know about all the linker inputs.
+                // However, if SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH is set, we allow caching
+                // all crate types. The env var value is hashed into the cache key so that
+                // machines with different linker setups get separate cache entries.
                 if !others.is_empty() {
-                    let others: Vec<&str> = others.iter().map(String::as_str).collect();
-                    let others_string = others.join(",");
-                    cannot_cache!("crate-type", others_string)
+                    if std::env::var("SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH").is_err() {
+                        let others: Vec<&str> = others.iter().map(String::as_str).collect();
+                        let others_string = others.join(",");
+                        cannot_cache!("crate-type", others_string)
+                    }
+                    crate_types.others.extend(others.iter().cloned());
                 }
                 crate_types.rlib |= rlib;
                 crate_types.staticlib |= staticlib;
@@ -1235,10 +1243,12 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
     // If it's not an rlib and not a staticlib then crate-type wasn't passed,
     // so it will usually be inferred as a binary, though the `#![crate_type`
     // annotation may dictate otherwise - either way, we don't know what to do.
-    if let CrateTypes {
-        rlib: false,
-        staticlib: false,
-    } = crate_types
+    // Unless SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH is set, in which case we
+    // allow caching regardless.
+    if !crate_types.rlib
+        && !crate_types.staticlib
+        && crate_types.others.is_empty()
+        && std::env::var("SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH").is_err()
     {
         cannot_cache!("crate-type", "No crate-type passed".to_owned())
     }
@@ -1540,6 +1550,15 @@ where
         cwd.hash(&mut HashToDigest { digest: &mut m });
         // 10. The version of the compiler.
         self.version.hash(&mut HashToDigest { digest: &mut m });
+        // 11. SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH, if set and we have unsupported
+        //     crate types: differentiates cache entries for machines with different
+        //     linker setups.
+        if !self.parsed_args.crate_types.others.is_empty() {
+            if let Ok(val) = std::env::var("SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH") {
+                m.update(b"SCCACHE_RUST_CRATE_TYPE_ALLOW_HASH=");
+                m.update(val.as_bytes());
+            }
+        }
 
         // Turn arguments into a simple Vec<OsString> to calculate outputs.
         let flat_os_string_arguments: Vec<OsString> = os_string_arguments
@@ -2161,13 +2180,8 @@ impl pkg::InputsPackager for RustInputsPackager {
 
         // If we're just creating an rlib then the only thing inspected inside dependency rlibs is the
         // metadata, in which case we can create a trimmed rlib (which is actually a .a) with the metadata
-        let can_trim_rlibs = matches!(
-            crate_types,
-            CrateTypes {
-                rlib: true,
-                staticlib: false,
-            }
-        );
+        let can_trim_rlibs =
+            crate_types.rlib && !crate_types.staticlib && crate_types.others.is_empty();
 
         let mut builder = tar::Builder::new(wtr);
 
@@ -3477,6 +3491,7 @@ proc_macro false
                 crate_types: CrateTypes {
                     rlib: true,
                     staticlib: false,
+                    others: vec![],
                 },
                 dep_info: None,
                 emit,
