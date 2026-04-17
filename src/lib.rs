@@ -74,7 +74,7 @@ pub static FORK_LOCK: RwLock<()> = RwLock::new(());
 ///
 /// This version is safe to be used in cache services to indicate the version
 /// that sccache ie.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-vercel");
 
 /// Used to denote the environment variable that controls
 /// logging for sccache, and sccache-dist.
