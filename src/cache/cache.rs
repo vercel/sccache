@@ -638,6 +638,7 @@ pub fn storage_from_config(
         preprocessor_cache_mode_config,
         rw_mode,
         config.basedirs.clone(),
+        config.fallback_cache.file_clone,
     )))
 }
 

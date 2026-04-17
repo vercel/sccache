@@ -59,6 +59,7 @@ fn test_multi_level_storage_get() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     );
     let cache2 = DiskCache::new(
         &cache_dir2,
@@ -67,6 +68,7 @@ fn test_multi_level_storage_get() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     );
 
     let cache1_storage: Arc<dyn Storage> = Arc::new(cache1);
@@ -131,6 +133,7 @@ fn test_multi_level_storage_backfill_on_hit() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     );
     let cache2 = DiskCache::new(
         &cache_dir2,
@@ -139,6 +142,7 @@ fn test_multi_level_storage_backfill_on_hit() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     );
 
     let cache1_storage: Arc<dyn Storage> = Arc::new(cache1);
@@ -295,6 +299,7 @@ fn test_disk_plus_remote_to_remote_backfill() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     ));
 
     let remote_l1 = Arc::new(InMemoryStorage::new()); // Memcached-like
@@ -398,6 +403,7 @@ fn test_disk_plus_remotes_write_to_all() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     ));
 
     let remote_l1 = Arc::new(InMemoryStorage::new());
@@ -861,6 +867,7 @@ fn test_preprocessor_cache_mode() {
         preprocessor_config,
         CacheMode::ReadWrite,
         vec![],
+        false,
     ));
 
     let cache_l1 = Arc::new(InMemoryStorage::new());
@@ -912,6 +919,7 @@ fn test_preprocessor_cache_methods() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     ));
 
     let storage = MultiLevelStorage::new(vec![disk_cache as Arc<dyn Storage>]);
@@ -954,6 +962,7 @@ fn test_readonly_level_in_check() {
         PreprocessorCacheModeConfig::default(),
         CacheMode::ReadWrite,
         vec![],
+        false,
     );
 
     // Wrap in ReadOnly
