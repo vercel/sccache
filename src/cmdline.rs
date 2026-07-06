@@ -238,6 +238,35 @@ pub fn try_parse() -> Result<Command> {
         }
     }
 
+    parse_args(args, internal_start_server, cwd)
+}
+
+/// Parse explicitly provided args into a `Result<Command>` to execute.
+///
+/// For embedders (e.g. multicall binaries that link sccache as a library and
+/// dispatch to it): `args` are interpreted exactly as an invocation of a
+/// binary named `sccache` — the first element is the program name and no
+/// compiler-masquerade detection is applied to it. `SCCACHE_START_SERVER=1`
+/// is honored like in [`try_parse`], so the internal server respawn works
+/// when `current_exe` is the embedding binary.
+pub fn try_parse_from<I, T>(args: I) -> Result<Command>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    trace!("parse (explicit args)");
+
+    let cwd =
+        env::current_dir().context("sccache: Couldn't determine current working directory")?;
+
+    // We only care if it's `1`
+    let internal_start_server = env::var(ENV_VAR_INTERNAL_START_SERVER).as_deref() == Ok("1");
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+
+    parse_args(args, internal_start_server, cwd)
+}
+
+fn parse_args(args: Vec<OsString>, internal_start_server: bool, cwd: PathBuf) -> Result<Command> {
     let matches_result = get_clap_command().try_get_matches_from(args);
 
     // A command can either be from `ENV_VAR_INTERNAL_START_SERVER` being set or from command-line
@@ -334,5 +363,43 @@ pub fn try_parse() -> Result<Command> {
                 unreachable!("Either the arg group or env variable should provide a command");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `try_parse_from` must interpret args as a plain `sccache` invocation
+    /// regardless of the host process's argv[0] — no compiler masquerade.
+    #[test]
+    fn test_try_parse_from_parses_compile_command() {
+        let cmd = try_parse_from(["sccache", "/usr/bin/rustc", "--crate-name", "foo"])
+            .expect("compile command parses");
+        match cmd {
+            Command::Compile { exe, cmdline, .. } => {
+                assert_eq!(exe, PathBuf::from("/usr/bin/rustc").into_os_string());
+                assert_eq!(
+                    cmdline,
+                    vec![
+                        OsString::from("--crate-name"),
+                        OsString::from("foo"),
+                    ]
+                );
+            }
+            _ => panic!("expected Command::Compile"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_from_parses_flags() {
+        assert!(matches!(
+            try_parse_from(["sccache", "--start-server"]),
+            Ok(Command::StartServer)
+        ));
+        assert!(matches!(
+            try_parse_from(["sccache", "--stop-server"]),
+            Ok(Command::StopServer)
+        ));
     }
 }

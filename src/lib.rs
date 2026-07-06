@@ -62,9 +62,30 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LOGGING_ENV: &str = "SCCACHE_LOG";
 
 pub fn main() {
+    run_with(cmdline::try_parse)
+}
+
+/// Entry point for embedding sccache in another binary (e.g. a multicall
+/// binary that links sccache as a library and dispatches to it).
+///
+/// `args` are interpreted exactly as an invocation of a binary named
+/// `sccache`: the first element is the program name (ignored for dispatch)
+/// and no compiler-masquerade detection is applied, regardless of the host
+/// process's `argv[0]`. `SCCACHE_START_SERVER=1` is honored like in
+/// [`main`], so the internal server respawn works when `current_exe` is the
+/// embedding binary. Never returns.
+pub fn main_from_args<I, T>(args: I) -> !
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    run_with(move || cmdline::try_parse_from(args))
+}
+
+fn run_with(parse: impl FnOnce() -> errors::Result<cmdline::Command>) -> ! {
     init_logging();
 
-    let command = match cmdline::try_parse() {
+    let command = match parse() {
         Ok(cmd) => cmd,
         Err(e) => match e.downcast::<clap::error::Error>() {
             // If the error is from clap then let them handle formatting and exiting
