@@ -560,6 +560,23 @@ where
         }
     }
 
+    run_compiler_locally(creator, runtime, exe, cmdline, cwd)
+}
+
+/// Run the compiler directly, without any caching, and return its exit
+/// status. The fallback for invocations the server cannot handle — and,
+/// when `SCCACHE_IGNORE_SERVER_IO_ERROR` is set, for a server that cannot
+/// be reached or started at all.
+fn run_compiler_locally<T>(
+    mut creator: T,
+    runtime: &mut Runtime,
+    exe: &Path,
+    cmdline: Vec<OsString>,
+    cwd: &Path,
+) -> Result<i32>
+where
+    T: CommandCreatorSync,
+{
     let mut cmd = creator.new_command_sync(exe);
     cmd.args(&cmdline).current_dir(cwd);
     if log_enabled!(Trace) {
@@ -807,7 +824,30 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 });
 
             let jobserver = Client::new();
-            let conn = connect_or_start_server(&get_addr(), startup_timeout)?;
+            let conn = match connect_or_start_server(&get_addr(), startup_timeout) {
+                Ok(conn) => conn,
+                Err(error) if ignore_all_server_io_errors() => {
+                    eprintln!(
+                        "sccache: warning: failed to connect to or start server, compiling \
+                         locally instead: {error:#}"
+                    );
+                    let mut runtime = new_client_runtime()?;
+                    let exe = which_in(
+                        Path::new(&exe),
+                        env::var_os("PATH"),
+                        &cwd,
+                    )?;
+                    return run_compiler_locally(
+                        ProcessCommandCreator::new(&jobserver),
+                        &mut runtime,
+                        &exe,
+                        cmdline,
+                        &cwd,
+                    )
+                    .context("failed to execute compiler locally");
+                }
+                Err(error) => return Err(error),
+            };
             let mut runtime = new_client_runtime()?;
             let res = do_compile(
                 ProcessCommandCreator::new(&jobserver),
